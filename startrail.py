@@ -26,7 +26,7 @@ from gimpfu import *
 
 import gettext
 locale_directory = gimp.locale_directory
-gettext.install( "gimp20-template" , locale_directory, unicode=True )
+gettext.install("gimp20-template", locale_directory, unicode=True)
 
 allowed_import_types = ["jpg","jpeg","tiff","tif","bmp","png"]
 
@@ -39,11 +39,13 @@ def file_is_image(file_name):
 	return(is_image)
 
 def get_new_image(raw_image):
-        if hasattr(gimp.Image, "precision"):
-	        return pdb.gimp_image_new_with_precision(raw_image.active_layer.width, raw_image.active_layer.height, 0,
-						         raw_image.precision)
-        else:
-	        return pdb.gimp_image_new(raw_image.active_layer.width, raw_image.active_layer.height, 0)
+	if hasattr(gimp.Image, "precision"):
+		return pdb.gimp_image_new_with_precision(raw_image.active_layer.width, 
+		                                         raw_image.active_layer.height, 
+		                                         0, raw_image.precision)
+	else:
+		return pdb.gimp_image_new(raw_image.active_layer.width, 
+		                          raw_image.active_layer.height, 0)
 
 def process_dark_frame(file_name, image, layer_count):
 	dark_frame = pdb.gimp_file_load(file_name,"")
@@ -59,7 +61,7 @@ def process_dark_frame(file_name, image, layer_count):
 	# formula taken from http://www.cambridgeincolour.com/tutorials/image-averaging-noise.htm
 	dark_layer.opacity = 100.0 / layer_count
 	# add the new layer and flatten down to keep memory useage down.
-	image.add_layer(dark_layer,0)
+	image.add_layer(dark_layer, 0)
 	image.flatten()
 	# Get rid of the image we loaded up.
 	gimp.delete(dark_frame)
@@ -80,13 +82,27 @@ def create_dark_image(dark_frames):
 	return dark_image
 
 def save_intermediate_frame(image, image_count, directory):
-	# build a save file_name pad the number to 5 digits which should be plenty for any timelapse.
-	intermediate_save_file_name = os.path.join(directory, "trail" + str(image_count).zfill(5) + ".jpg")
-	pdb.gimp_file_save(image,pdb.gimp_image_get_active_drawable(image),intermediate_save_file_name,intermediate_save_file_name)
+	# Build a save file_name pad the number to 5 digits
+	# which should be plenty for any timelapse.
+	intermediate_save_file_name = os.path.join(directory, 
+	                               "trail" + str(image_count).zfill(5) + ".jpg")
+	if len(image.layers) > 1:
+		# To export all visible layers, duplicate the image,
+		# merge all visible layers, then save the resulting drawable.
+		new_image = pdb.gimp_image_duplicate(image)
+		layer = pdb.gimp_image_merge_visible_layers(new_image, CLIP_TO_IMAGE)
+		pdb.gimp_file_save(new_image, layer, intermediate_save_file_name, 
+		                   intermediate_save_file_name)
+		pdb.gimp_image_delete(new_image)
+	else:
+		# This is the quicker way for single-layer images
+		pdb.gimp_file_save(image, pdb.gimp_image_get_active_drawable(image), 
+		                   intermediate_save_file_name, intermediate_save_file_name)
 
-def process_light_frame(file_name, image, dark_image, merge_layers, image_count, subtract_skyglow, opacity):
+def process_light_frame(file_name, image, dark_image, merge_layers, image_count, 
+                        subtract_skyglow, opacity, limit_trail, insert_at_end):
 	# load up the light frame into an image
-	light_frame = pdb.gimp_file_load(file_name,"")
+	light_frame = pdb.gimp_file_load(file_name, "")
 
 	# have we got a base image to work with?
 	if image == None:
@@ -98,7 +114,8 @@ def process_light_frame(file_name, image, dark_image, merge_layers, image_count,
 	if dark_image != None:
 		# As we have a dark image we need to subtract it from the light frame.
 		# create a new layer from the dark image
-		dark_layer = pdb.gimp_layer_new_from_drawable(dark_image.active_layer, light_frame)
+		dark_layer = pdb.gimp_layer_new_from_drawable(dark_image.active_layer, 
+		                                              light_frame)
 		# set the layer to layer_mode_difference
 		dark_layer.mode = SUBTRACT_MODE
 		# add the layer to the light_frame
@@ -107,7 +124,8 @@ def process_light_frame(file_name, image, dark_image, merge_layers, image_count,
 		light_frame.flatten()
 
 	if subtract_skyglow != 0:
-		glow_layer = pdb.gimp_layer_new_from_drawable (light_frame.active_layer, light_frame)
+		glow_layer = pdb.gimp_layer_new_from_drawable(light_frame.active_layer, 
+		                                              light_frame)
 		glow_layer.mode = SUBTRACT_MODE
 		if subtract_skyglow == 1:
 			glow_layer.opacity = 25.0
@@ -122,26 +140,42 @@ def process_light_frame(file_name, image, dark_image, merge_layers, image_count,
 		pdb.plug_in_gauss(light_frame, glow_layer, 500, 500, 0)
 		light_frame.flatten()
 
-	# Set the light frame to layer_mode_lighten
+	# set the light frame to layer_mode_lighten
 	light_layer = pdb.gimp_layer_new_from_drawable(light_frame.active_layer, image)
 	light_layer.mode = LIGHTEN_ONLY_MODE
 	light_layer.opacity = opacity
 
-	# add this as new layer
-	image.add_layer(light_layer,0)
+	# add this as new layer, either at the top or the end or the layer list
+	if insert_at_end:
+		image.add_layer(light_layer, len(image.layers))
+	else:
+		image.add_layer(light_layer, 0)
 
 	if merge_layers == 1:
 		image.flatten()
 	else:
 		light_layer.name = "layer " + str(image_count).zfill(5)
+		# If the length of the trail should be limited,
+		# copy opacities of each layer by one level up or down
+		# then get rid of the oldest layer
+		if limit_trail > 0 and len(image.layers) > limit_trail:
+			if insert_at_end:
+				for n in range(len(image.layers)-1, 0, -1):
+					image.layers[n].opacity = image.layers[n-1].opacity
+				image.remove_layer(image.layers[0])
+			else:
+				for n in range(0, len(image.layers)-1):
+					image.layers[n].opacity = image.layers[n+1].opacity
+				image.remove_layer(image.layers[-1])
 
 	# clean up our temp bits.
 	gimp.delete(light_frame)
 	return(image)
 
-def startrail(frames, use_dark_frames, dark_frames, save_intermediate, save_directory, live_display, merge_layers, subtract_skyglow, fade):
-	#Do some santity checking before we start
-	# Light frames
+def startrail(frames, use_dark_frames, dark_frames, save_intermediate, save_directory, 
+              live_display, merge_layers, subtract_skyglow, fade, limit_trail):
+	# do some santity checking before we start
+	# light frames
 	if len(frames) == 0:
 		pdb.gimp_message("No light frame path provided.")
 		return
@@ -150,12 +184,12 @@ def startrail(frames, use_dark_frames, dark_frames, save_intermediate, save_dire
 		pdb.gimp_message("Light frame path doesn't exist.")
 		return
 
-	# Dark frames
+	# dark frames
 	if use_dark_frames == 1 and not os.path.exists(dark_frames):
 		pdb.gimp_message("Dark frame save path doesn't exist.")
 		return
 
-	# Intermediate frame path
+	# intermediate frame path
 	if save_intermediate == 1 and not os.path.exists(save_directory):
 		pdb.gimp_message("Intermediate frame save path doesn't exist.")
 		return
@@ -165,37 +199,56 @@ def startrail(frames, use_dark_frames, dark_frames, save_intermediate, save_dire
 	if use_dark_frames == 1:
 		dark_image = create_dark_image(dark_frames)
 
-	# Create a counter to count the frames we layer
+	# create a counter to count the frames we layer
 	image_count = 0
+
+	# If we want to fade in, put new layers always at the begin,
+	# otherwise at the end of the layer list.
+	insert_at_end = False
+	if fade == 1:
+		insert_at_end = True
 
 	opacity = 100.0
 
 	# Define an image to work in.
-	# This will be created from the first light frame we process
+	# This will be created from the first light frame we process.
 	image = None
 	images = os.listdir(frames)
 	images.sort()
+
+	trlen = len(images)
+	if limit_trail > 0 and limit_trail < trlen:
+		trlen = limit_trail
+
 	for file_name in images:
 		file_name = os.path.join(frames, file_name)
 
 		if file_is_image(file_name):
-			if fade == 1: # Fade in
-				opacity = (image_count * 100.0 / len(images))
-                        elif fade == 2: # Fade out
-				opacity = 100.0 - (image_count * 100.0 / len(images))
+			if fade == 1:    # Fade in
+				opacity = ((image_count + 1) * 100.0 / trlen)
+			elif fade == 2:  # Fade out
+				opacity = 100.0 - (image_count * 100.0 / trlen)
+
+			if opacity > 100.0:
+				opacity = 100.0
+			elif opacity < 0.0:
+				opacity = 0.0
+
 			image_count += 1
-			image = process_light_frame(file_name, image, dark_image, merge_layers,image_count, subtract_skyglow, opacity)
+			image = process_light_frame(file_name, image, dark_image, merge_layers, 
+			                            image_count, subtract_skyglow, opacity, 
+			                            limit_trail, insert_at_end)
 			if save_intermediate == 1:
 				save_intermediate_frame(image, image_count, save_directory)
 
 			if live_display == 1:
-				# If first frame display the image to screen.
+				# if first frame, display the image to screen
 				if image_count == 1:
 					gimp.Display(image)
-				# Update the display
+				# update the display
 				gimp.displays_flush()
 
-	# show the new image if we managed to make one.
+	# Show the new image if we managed to make one.
 	if image == None:
 		pdb.gimp_message("No images found to stack")
 
@@ -207,32 +260,32 @@ def startrail(frames, use_dark_frames, dark_frames, save_intermediate, save_dire
 			gimp.Display(image)
 
 	if dark_image != None:
-		gimp.delete(dark_image) # we don't need this any more so get rid of it so not to leak.
+		# We don't need this any more so get rid of it so not to leak.
+		gimp.delete(dark_image)
 
 register(
-	"startrail",
-	"",
-	"",
+	"startrail", "", "",
 	"Christopher Pearson",
-	"GPL v3",
-	"2011",
-	_("Startrail"),
-	"",
+	"GPL v3", "2011",
+	_("Startrail"), "",
 	[
-		(PF_DIRNAME, "frames","Light Frames",""),
-		(PF_TOGGLE, "use_dark_frames","Use dark frame",0),
-		(PF_DIRNAME, "dark_frames","Dark Frames",""),
-		(PF_TOGGLE, "save_intermediate","Save intermediate frames",0),
-		(PF_DIRNAME, "save_directory","Intermediate save directory",""),
-		(PF_TOGGLE, "live_display","Live display update (much slower)",0),
-		(PF_TOGGLE, "merge_layers","Merge all images to a single layer",1),
-		(PF_OPTION, "subtract_skyglow","Subtract skyglow (much slower)",0, ["None", "Light", "Moderate", "Heavy", "Full"]),
-		(PF_OPTION, "fade", "Fade trails", 0, ["None", "In", "Out"])
+		(PF_DIRNAME, "frames", "Light Frames", ""),
+		(PF_TOGGLE,  "use_dark_frames", "Use dark frame", 0),
+		(PF_DIRNAME, "dark_frames", "Dark Frames", ""),
+		(PF_TOGGLE,  "save_intermediate", "Save intermediate frames", 0),
+		(PF_DIRNAME, "save_directory", "Intermediate save directory", ""),
+		(PF_TOGGLE,  "live_display", "Live display update (much slower)", 0),
+		(PF_TOGGLE,  "merge_layers", "Merge all images to a single layer", 0),
+		(PF_OPTION,  "subtract_skyglow", "Subtract skyglow (much slower)", 0, 
+		             ["None", "Light", "Moderate", "Heavy", "Full"]),
+		(PF_OPTION,  "fade", "Fade trails", 0, ["None", "In", "Out"]),
+		(PF_INT,     "limit_trail", "Limit trail length (0 = infinite)", 0)
 	],
 	[],
 	startrail,
 	menu="<Image>/File/Create",
 	domain=("gimp20-template", locale_directory)
-	)
+)
 
 main()
+
